@@ -1,12 +1,13 @@
-# sceneshift
-App to detect significant changes in video input 
+# Keyframe Extractor & Visual Change Explorer
 
-# Keyframe Extractor: Visual Change Highlights
+Upload a short video, pick a change metric (SSIM / Color Histogram / MSE),
+and extract the most significant moments of visual change. Then compare frames
+side-by-side, crossfade between them, or view an SSIM difference heatmap.
 
-This Streamlit app uploads a video and selects frames where visual change is most significant, using difference metrics and optional GPU acceleration.
+## Run locally
+python -m pip install -r requirements.txt
+streamlit run app.py
 
-## Run Locally
-
-```bash
-pip install -r requirements.txt
-streamlit run streamlit_app.py
+## Deploy to Streamlit Cloud
+- Push to GitHub with app.py at repo root (or set working dir in the app config).
+- Set Python version to 3.10–3.12. No extra system packages required.
