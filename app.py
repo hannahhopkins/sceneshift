@@ -72,12 +72,14 @@ def compute_scores(frames, metric):
 
         if metric == "SSIM (1-SSIM)":
             val = 1 - ssim(rgb2gray(A), rgb2gray(B), data_range=255)
+
         elif metric == "Color Histogram (Bhattacharyya)":
             Ah = cv2.calcHist([cv2.cvtColor(A, cv2.COLOR_RGB2HSV)], [0,1,2], None, [8,8,8], [0,180,0,256,0,256])
             Bh = cv2.calcHist([cv2.cvtColor(B, cv2.COLOR_RGB2HSV)], [0,1,2], None, [8,8,8], [0,180,0,256,0,256])
             cv2.normalize(Ah, Ah); cv2.normalize(Bh, Bh)
             val = cv2.compareHist(Ah, Bh, cv2.HISTCMP_BHATTACHARYYA)
-        else:
+
+        else:  # MSE
             diff = (A.astype(float) - B.astype(float))
             val = np.mean(diff * diff) / (255 * 255)
 
@@ -105,7 +107,17 @@ with st.sidebar:
     st.header("Controls")
     uploaded = st.file_uploader("Upload Video", type=["mp4","mov","avi","mkv"], key="video_upload")
     sample_fps = st.slider("Sampling FPS", 1.0, 8.0, 2.0)
+
     metric = st.radio("Change Metric", ["SSIM (1-SSIM)", "Color Histogram (Bhattacharyya)", "MSE"])
+
+    # NEW — descriptive guidance directly under selector
+    if metric == "SSIM (1-SSIM)":
+        st.caption("Measures structural layout differences. Best for detecting shot changes or composition shifts.")
+    elif metric == "Color Histogram (Bhattacharyya)":
+        st.caption("Compares overall color distribution. Useful when overall tone or lighting changes significantly.")
+    else:
+        st.caption("Pixel-wise difference. Sensitive to camera shake and noise; use when fine detail differences matter.")
+
     k = st.slider("Number of Keyframes", 5, 30, 12)
     min_gap_sec = st.slider("Minimum Time Between Keyframes (sec)", 0.0, 5.0, 0.5)
 
@@ -151,6 +163,7 @@ col2.image(B, caption="Frame B", use_column_width=True)
 alpha = st.slider("Crossfade Blend Amount", 0.0, 1.0, 0.5)
 st.image(blend(A,B,alpha), caption=f"Blend: {alpha:.2f}", use_column_width=True)
 
+
 ssim_score = ssim(rgb2gray(A), rgb2gray(B), data_range=255)
 
 if ssim_score > 0.85:
@@ -164,3 +177,20 @@ else:
 
 st.markdown(f"SSIM Score = {ssim_score:.4f}")
 st.markdown(f"Interpretation: {interpretation}")
+
+
+# NEW — reference guide
+with st.expander("How to choose the right metric"):
+    st.markdown("""
+**SSIM (1-SSIM)**  
+Focuses on structural similarity — it reacts to composition, object arrangement, and scene layout.  
+Use when you want to detect shot boundaries, reframing, subject repositioning, or meaningful context changes.
+
+**Color Histogram (Bhattacharyya)**  
+Ignores structure, focuses on color palette.  
+Use when the video shifts from indoors to outdoors, day to night, warm to cool lighting, etc.
+
+**MSE (Mean Squared Error)**  
+Measures raw pixel difference.  
+Use only when very fine visual detail differences matter. It is sensitive to noise and camera motion.
+""" )
