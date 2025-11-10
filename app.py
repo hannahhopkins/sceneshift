@@ -3,11 +3,17 @@ import cv2
 import numpy as np
 import tempfile
 import requests
+import yt_dlp
 from skimage.metrics import structural_similarity as ssim
+import plotly.graph_objects as go
+
 
 st.set_page_config(page_title="Keyframe Extractor & Visual Change Explorer", layout="wide")
 
 
+# -----------------------------
+# Frame Record
+# -----------------------------
 class FrameRecord:
     def __init__(self, index, time_s, bgr):
         self.index = index
@@ -16,6 +22,9 @@ class FrameRecord:
         self.rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
+# -----------------------------
+# Utility Functions
+# -----------------------------
 def resize_max(img, max_w=480):
     h, w = img.shape[:2]
     scale = min(max_w / w, 1.0)
@@ -30,22 +39,67 @@ def blend(a, b, alpha):
     return np.clip(a * alpha + b * (1 - alpha), 0, 255).astype(np.uint8)
 
 
+# -----------------------------
+# Video Input (Upload OR URL + yt-dlp)
+# -----------------------------
 def load_video_bytes(uploaded_file, url):
     if uploaded_file:
         return uploaded_file.getvalue()
 
-    if url:
-        try:
-            response = requests.get(url, timeout=15)
-            response.raise_for_status()
+    if not url:
+        return None
+
+    # Try direct download first
+    try:
+        response = requests.get(url, timeout=10, stream=True)
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "video" in content_type or url.lower().endswith((".mp4",".mov",".avi",".mkv",".webm")):
             return response.content
-        except Exception as e:
-            st.error(f"Could not download video from URL: {e}")
-            return None
+    except:
+        pass
 
-    return None
+    # Fall back to yt-dlp with progress UI
+    st.write("Downloading via yt-dlp...")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    def progress_hook(d):
+        if d.get("status") == "downloading":
+            downloaded = d.get("downloaded_bytes", 0)
+            total = d.get("total_bytes", None) or d.get("total_bytes_estimate", None)
+            if total:
+                frac = min(downloaded / total, 1.0)
+                progress_bar.progress(frac)
+        elif d.get("status") == "finished":
+            progress_bar.progress(1.0)
+            status_text.text("Download complete. Processing...")
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            out_path = tmp.name
+
+        ydl_opts = {
+            "format": "bestvideo+bestaudio/best",
+            "merge_output_format": "mp4",
+            "outtmpl": out_path,
+            "quiet": True,
+            "progress_hooks": [progress_hook]
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        with open(out_path, "rb") as f:
+            return f.read()
+
+    except Exception as e:
+        st.error(f"Video download failed: {e}")
+        return None
 
 
+# -----------------------------
+# Decode + Sample Frames
+# -----------------------------
 def decode_video(file_bytes, sample_fps):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tmp.write(file_bytes)
@@ -60,6 +114,7 @@ def decode_video(file_bytes, sample_fps):
     orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30
     duration = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1) / orig_fps
 
+    # Adaptive sampling for long videos
     if duration > 120:
         sample_fps *= 0.25
     elif duration > 40:
@@ -81,6 +136,9 @@ def decode_video(file_bytes, sample_fps):
     return frames, orig_fps, duration
 
 
+# -----------------------------
+# Compute Change Between Frames
+# -----------------------------
 def compute_scores(frames, metric):
     scores = []
     for i in range(1, len(frames)):
@@ -96,7 +154,7 @@ def compute_scores(frames, metric):
             cv2.normalize(Ah, Ah); cv2.normalize(Bh, Bh)
             val = cv2.compareHist(Ah, Bh, cv2.HISTCMP_BHATTACHARYYA)
 
-        else:
+        else:  # MSE
             diff = (A.astype(float) - B.astype(float))
             val = np.mean(diff * diff) / (255 * 255)
 
@@ -105,6 +163,9 @@ def compute_scores(frames, metric):
     return np.array(scores)
 
 
+# -----------------------------
+# Keyframe Selection
+# -----------------------------
 def pick_keyframes(frames, scores, k, min_gap_sec, sample_fps):
     gap = max(int(min_gap_sec * sample_fps), 1)
     order = list(np.argsort(scores)[::-1])
@@ -120,23 +181,41 @@ def pick_keyframes(frames, scores, k, min_gap_sec, sample_fps):
     return [frames[i] for i in picks]
 
 
+# -----------------------------
+# Sidebar UI
+# -----------------------------
 with st.sidebar:
     st.header("Video Input")
-    uploaded = st.file_uploader("Upload Video File", type=["mp4","mov","avi","mkv"], key="video_upload")
-    url = st.text_input("Or enter direct video URL (mp4/mov/avi/etc.)")
+    uploaded = st.file_uploader("Upload Video File", type=["mp4","mov","avi","mkv"])
+    url = st.text_input("Or paste a video link (YouTube, Vimeo, TikTok, etc.)")
 
     st.header("Keyframe Settings")
     sample_fps = st.slider("Sampling FPS", 1.0, 8.0, 2.0)
     metric = st.radio("Change Metric", ["SSIM (1-SSIM)", "Color Histogram (Bhattacharyya)", "MSE"])
+
+    if metric == "SSIM (1-SSIM)":
+        st.caption("Measures structural layout changes. Best for shot boundaries and reframing.")
+    elif metric == "Color Histogram (Bhattacharyya)":
+        st.caption("Compares overall color palette. Useful for lighting / tone / scene mood changes.")
+    else:
+        st.caption("Pixel-wise difference. Sensitive to noise; use when fine details matter.")
+
     k = st.slider("Number of Keyframes", 5, 30, 12)
     min_gap_sec = st.slider("Minimum Time Between Keyframes (sec)", 0.0, 5.0, 0.5)
+
 
 st.title("Keyframe Extractor & Visual Change Explorer")
 
 file_bytes = load_video_bytes(uploaded, url)
 if not file_bytes:
-    st.info("Upload a video or enter a direct link to begin.")
+    st.info("Upload a video or enter a link to begin.")
     st.stop()
+
+
+# Video Preview
+with st.expander("Preview Video"):
+    st.video(file_bytes)
+
 
 frames, orig_fps, duration = decode_video(file_bytes, sample_fps)
 if len(frames) < 2:
@@ -146,11 +225,50 @@ if len(frames) < 2:
 scores = compute_scores(frames, metric)
 keyframes = pick_keyframes(frames, scores, k, min_gap_sec, sample_fps)
 
+
+# -----------------------------
+# Interactive Timeline (Plotly)
+# -----------------------------
+st.subheader("Change Score Timeline (Interactive)")
+
+if len(scores) > 0:
+    times = [frames[i].time_s for i in range(1, len(frames))]
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(x=times, y=scores, mode="lines", name="Change Score"))
+
+    keyframe_times = [fr.time_s for fr in keyframes]
+    fig.add_trace(go.Scatter(
+        x=keyframe_times,
+        y=[scores[min(i, len(scores)-1)] for i in [frames.index(f) for f in keyframes]],
+        mode="markers",
+        marker=dict(size=8),
+        name="Keyframes"
+    ))
+
+    fig.update_layout(
+        xaxis_title="Time (seconds)",
+        yaxis_title="Change Score",
+        showlegend=True
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.caption("Not enough data to display timeline.")
+
+
+# -----------------------------
+# Display Keyframes
+# -----------------------------
 st.subheader(f"Selected Keyframes ({len(keyframes)})")
 cols = st.columns(min(len(keyframes), 6))
 for i, fr in enumerate(keyframes):
     cols[i % len(cols)].image(fr.rgb, caption=f"Time: {fr.time_s:.2f}s | Frame {fr.index}", use_column_width=True)
 
+
+# -----------------------------
+# Frame Comparison
+# -----------------------------
 st.markdown("---")
 st.subheader("Compare Frames")
 
@@ -160,6 +278,7 @@ iB = st.selectbox("Frame B", range(len(keyframes)), format_func=lambda i: labels
 
 A = keyframes[iA].rgb
 B = keyframes[iB].rgb
+
 h = min(A.shape[0], B.shape[0])
 w = min(A.shape[1], B.shape[1])
 A = cv2.resize(A, (w,h))
