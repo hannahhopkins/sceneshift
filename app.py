@@ -131,6 +131,20 @@ with st.sidebar:
 if not uploaded:
     st.stop()
 
+with st.sidebar:
+    st.header("Controls")
+    uploaded = st.file_uploader("Upload Video", type=["mp4", "mov", "avi", "mkv"])
+    sample_fps = st.slider("Sampling FPS", 1.0, 8.0, 2.0)
+    metric = st.radio("Change Metric", ["SSIM (1-SSIM)", "Color Histogram (Bhattacharyya)", "MSE"])
+    k = st.slider("Number of Keyframes", 5, 30, 12)
+    min_gap_sec = st.slider("Minimum Separation Between Keyframes (seconds)", 0.0, 5.0, 0.5)
+    st.markdown("---")
+    st.caption("Lower SSIM = more structural change. Large change → likely scene cut.")
+
+# ---- PAGE TITLE ----
+st.title("Keyframe Extractor & Visual Change Explorer")
+
+
 # -----------------------------
 # Extract Keyframes
 # -----------------------------
