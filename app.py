@@ -22,7 +22,7 @@ class FrameRecord:
 
 
 # ------------------------------------------------------------
-# Utilities
+# Utility functions
 # ------------------------------------------------------------
 def resize_max(img, max_w=480):
     h, w = img.shape[:2]
@@ -39,16 +39,11 @@ def blend(a, b, alpha):
 
 
 # ------------------------------------------------------------
-# Cached downloader (to avoid repeated downloads)
+# Cached video downloader (URL → bytes)
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def download_video_cached(url, quality_format, no_audio):
-    """
-    Downloads video once and returns raw bytes.
-    Cached by (url, quality_format, no_audio).
-    """
-
-    # Try direct link first
+    # Try direct .mp4/.mov/etc download first
     try:
         response = requests.get(url, timeout=8, stream=True)
         content_type = response.headers.get("Content-Type", "").lower()
@@ -63,23 +58,21 @@ def download_video_cached(url, quality_format, no_audio):
         if d.get("status") == "downloading":
             downloaded = d.get("downloaded_bytes", 0)
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
-
             if total:
                 frac = min(downloaded / total, 1.0)
                 percent = int(frac * 100)
                 progress_bar.progress(frac, text=f"Downloading: {percent}%")
-
         elif d.get("status") == "finished":
             progress_bar.progress(1.0, text="Download complete. Processing video…")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
         out_path = tmp.name
 
-    # Quality + Speed rules
+    # Force MP4 container for OpenCV compatibility
     if no_audio:
-        format_string = quality_format   # avoids merging entirely
+        format_string = f"{quality_format}[ext=mp4]"
     else:
-        format_string = f"{quality_format}+bestaudio/best"
+        format_string = f"{quality_format}+bestaudio[ext=mp4]/best[ext=mp4]"
 
     ydl_opts = {
         "format": format_string,
@@ -96,46 +89,6 @@ def download_video_cached(url, quality_format, no_audio):
         with open(out_path, "rb") as f:
             return f.read()
 
-    except Exception as e:
-        st.error(f"Download failed: {e}")
-        return None
-
-    def hook(d):
-        if d.get("status") == "downloading":
-            downloaded = d.get("downloaded_bytes", 0)
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            if total:
-                frac = downloaded / total
-                progress.progress(min(1.0, frac))
-                progress_label.text(f"Downloading: {int(frac * 100)}%")
-        elif d.get("status") == "finished":
-            progress.progress(1.0)
-            progress_label.text("Download complete. Processing video…")
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-        out_path = tmp.name
-
-    if no_audio:
-        # No audio: fastest, avoids merging entirely
-        format_string = quality_format
-    else:
-        # Include audio, but avoid overly slow merging where possible
-        format_string = f"{quality_format}+bestaudio/best"
-
-    ydl_opts = {
-        "format": format_string,
-        "outtmpl": out_path,
-        "quiet": True,
-        "progress_hooks": [hook],
-        "nocheckcertificate": True,
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-        with open(out_path, "rb") as f:
-            return f.read()
     except Exception as e:
         st.error(f"Download failed: {e}")
         return None
@@ -144,15 +97,13 @@ def download_video_cached(url, quality_format, no_audio):
 def load_video_bytes(uploaded_file, url, quality_format, no_audio):
     if uploaded_file:
         return uploaded_file.getvalue()
-
     if url:
         return download_video_cached(url, quality_format, no_audio)
-
     return None
 
 
 # ------------------------------------------------------------
-# Decode + sampling
+# Decode + frame sampling
 # ------------------------------------------------------------
 def decode_video(file_bytes, sample_fps):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -177,21 +128,21 @@ def decode_video(file_bytes, sample_fps):
     stride = max(int(fps / sample_fps), 1)
 
     frames = []
-    idx = 0
+    i = 0
     while True:
         ret, fr = cap.read()
         if not ret:
             break
-        if idx % stride == 0:
-            frames.append(FrameRecord(idx, idx / fps, resize_max(fr)))
-        idx += 1
+        if i % stride == 0:
+            frames.append(FrameRecord(i, i / fps, resize_max(fr)))
+        i += 1
 
     cap.release()
     return frames, fps, duration
 
 
 # ------------------------------------------------------------
-# Scoring
+# Change scoring
 # ------------------------------------------------------------
 def compute_scores(frames, metric):
     scores = []
@@ -223,11 +174,13 @@ def pick_keyframes(frames, scores, k, min_gap_sec, sample_fps):
     gap = max(int(min_gap_sec * sample_fps), 1)
     order = list(np.argsort(scores)[::-1])
     picks = []
+
     for i in order:
         if len(picks) >= k:
             break
         if all(abs(i - p) >= gap for p in picks):
             picks.append(i)
+
     picks.sort()
     return [frames[i] for i in picks]
 
@@ -241,13 +194,9 @@ with st.sidebar:
     url = st.text_input("Or paste a video link (YouTube, Vimeo, TikTok, etc.)")
 
     st.header("Download Quality")
-    quality_choice = st.selectbox(
-        "Video Quality",
-        ["Low (≤480p)", "Medium (≤720p)", "High (best available)"]
-    )
-
+    quality_choice = st.selectbox("Video Quality", ["Low (≤480p)", "Medium (≤720p)", "High (best available)"])
     no_audio = st.checkbox("Do not download audio (faster)")
-    
+
     if quality_choice == "Low (≤480p)":
         quality_format = "bv*[height<=480]"
     elif quality_choice == "Medium (≤720p)":
@@ -262,11 +211,14 @@ with st.sidebar:
     min_gap_sec = st.slider("Minimum Time Between Keyframes (sec)", 0.0, 5.0, 0.5)
 
 
+# ------------------------------------------------------------
+# Load / decode
+# ------------------------------------------------------------
 st.title("Keyframe Extractor & Visual Change Explorer")
-
 file_bytes = load_video_bytes(uploaded, url, quality_format, no_audio)
+
 if file_bytes is None:
-    st.info("Upload a file or enter a valid video link.")
+    st.info("Upload a file or enter a valid video link to begin.")
     st.stop()
 
 with st.expander("Preview Video"):
@@ -274,7 +226,7 @@ with st.expander("Preview Video"):
 
 frames, fps, duration = decode_video(file_bytes, sample_fps)
 if len(frames) < 2:
-    st.error("Not enough frames could be decoded.")
+    st.error("Not enough frames could be decoded. Try another quality setting: Low or Medium usually works best.")
     st.stop()
 
 scores = compute_scores(frames, metric)
@@ -282,28 +234,29 @@ keyframes = pick_keyframes(frames, scores, k, min_gap_sec, sample_fps)
 
 
 # ------------------------------------------------------------
-# Interactive timeline
+# Timeline
 # ------------------------------------------------------------
 st.subheader("Change Score Timeline (Interactive)")
 if len(scores) > 0:
     times = [frames[i].time_s for i in range(1, len(frames))]
-
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=times, y=scores, mode="lines", name="Change Score"))
-    key_times = [fr.time_s for fr in keyframes]
+
+    k_times = [fr.time_s for fr in keyframes]
     fig.add_trace(go.Scatter(
-        x=key_times,
+        x=k_times,
         y=[scores[min(i, len(scores)-1)] for i in [frames.index(f) for f in keyframes]],
         mode="markers",
         marker=dict(size=8),
         name="Keyframes"
     ))
-    fig.update_layout(xaxis_title="Time (seconds)", yaxis_title="Change Score", showlegend=True)
+
+    fig.update_layout(xaxis_title="Time (seconds)", yaxis_title="Change Score")
     st.plotly_chart(fig, use_container_width=True)
 
 
 # ------------------------------------------------------------
-# Keyframes display
+# Display keyframes
 # ------------------------------------------------------------
 st.subheader(f"Selected Keyframes ({len(keyframes)})")
 cols = st.columns(min(len(keyframes), 6))
@@ -312,7 +265,7 @@ for i, fr in enumerate(keyframes):
 
 
 # ------------------------------------------------------------
-# Comparison
+# Frame comparison
 # ------------------------------------------------------------
 st.markdown("---")
 st.subheader("Compare Frames")
@@ -328,11 +281,11 @@ w = min(A.shape[1], B.shape[1])
 A = cv2.resize(A, (w,h))
 B = cv2.resize(B, (w,h))
 
-col1, col2 = st.columns(2)
-col1.image(A, caption="Frame A", use_column_width=True)
-col2.image(B, caption="Frame B", use_column_width=True)
+c1, c2 = st.columns(2)
+c1.image(A, caption="Frame A", use_column_width=True)
+c2.image(B, caption="Frame B", use_column_width=True)
 
-alpha = st.slider("Crossfade Blend Amount", 0.0, 1.0, 0.5)
+alpha = st.slider("Crossfade Blend", 0.0, 1.0, 0.5)
 st.image(blend(A,B,alpha), caption=f"Blend: {alpha:.2f}", use_column_width=True)
 
 score = ssim(rgb2gray(A), rgb2gray(B), data_range=255)
