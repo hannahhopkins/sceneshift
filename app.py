@@ -3,13 +3,13 @@ import cv2
 import numpy as np
 from PIL import Image
 import tempfile
-from typing import List
 from skimage.metrics import structural_similarity as ssim
 
 st.set_page_config(page_title="Keyframe Extractor & Visual Change Explorer", layout="wide")
 
+
 # -----------------------------
-# Frame Container
+# Frame container
 # -----------------------------
 class FrameRecord:
     def __init__(self, index, time_s, bgr):
@@ -18,13 +18,14 @@ class FrameRecord:
         self.bgr = bgr
         self.rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
+
 # -----------------------------
 # Helpers
 # -----------------------------
 def resize_max(img, max_w=960, max_h=540):
     h, w = img.shape[:2]
-    scale = min(max_w / w, max_h / h, 1.0)
-    return cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    s = min(max_w / w, max_h / h, 1.0)
+    return cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
 
 def rgb2gray(x):
     return cv2.cvtColor(x, cv2.COLOR_RGB2GRAY)
@@ -40,8 +41,9 @@ def ssim_diff_map(a_rgb, b_rgb):
     heat = cv2.applyColorMap(diff, cv2.COLORMAP_JET)
     return cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), float(score)
 
+
 # -----------------------------
-# Video Decode (Fixed — no cache_path)
+# Video decode (safe — no get_cache_path)
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def decode_video(file_bytes, sample_fps):
@@ -52,7 +54,7 @@ def decode_video(file_bytes, sample_fps):
 
     cap = cv2.VideoCapture(tmp_path)
     if not cap.isOpened():
-        st.error("Video decode failed — Try re-encoding your video.")
+        st.error("Video decode failed — Try re-encoding the video.")
         return []
 
     orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30
@@ -72,15 +74,17 @@ def decode_video(file_bytes, sample_fps):
     cap.release()
     return frames
 
+
 # -----------------------------
-# Scoring + Selection
+# Scoring & Selection (fixed hash issue)
 # -----------------------------
 @st.cache_data(show_spinner=False)
-def compute_scores(frames, metric):
+def compute_scores(_frames, metric):
     scores = []
-    for i in range(1, len(frames)):
-        A = frames[i - 1].rgb
-        B = frames[i].rgb
+    for i in range(1, len(_frames)):
+        A = _frames[i - 1].rgb
+        B = _frames[i].rgb
+
         if metric == "SSIM (1-SSIM)":
             val = 1 - ssim(rgb2gray(A), rgb2gray(B), data_range=255)
         elif metric == "Color Histogram (Bhattacharyya)":
@@ -89,35 +93,40 @@ def compute_scores(frames, metric):
             cv2.normalize(Ah, Ah)
             cv2.normalize(Bh, Bh)
             val = cv2.compareHist(Ah, Bh, cv2.HISTCMP_BHATTACHARYYA)
-        else:
-            diff = (A.astype(float)-B.astype(float))
-            val = np.mean(diff*diff)/(255*255)
+        else:  # MSE
+            diff = (A.astype(float) - B.astype(float))
+            val = np.mean(diff * diff) / (255 * 255)
+
         scores.append(val)
+
     return np.array(scores)
 
-def pick_keyframes(frames, scores, k, min_gap_sec, sample_fps):
+
+def pick_keyframes(_frames, scores, k, min_gap_sec, sample_fps):
     gap = max(int(min_gap_sec * sample_fps), 1)
     order = list(np.argsort(scores)[::-1])
     picks = []
     for i in order:
-        if len(picks) >= k: break
+        if len(picks) >= k:
+            break
         if all(abs(i - p) >= gap for p in picks):
             picks.append(i)
     picks.sort()
-    return [frames[i] for i in picks]
+    return [_frames[i] for i in picks]
+
 
 # -----------------------------
-# UI Sidebar
+# Sidebar UI
 # -----------------------------
 with st.sidebar:
     st.header("Controls")
-    uploaded = st.file_uploader("Video File", type=["mp4", "mov", "avi", "mkv"])
+    uploaded = st.file_uploader("Upload Video", type=["mp4", "mov", "avi", "mkv"])
     sample_fps = st.slider("Sampling FPS", 1.0, 8.0, 2.0)
     metric = st.radio("Change Metric", ["SSIM (1-SSIM)", "Color Histogram (Bhattacharyya)", "MSE"])
     k = st.slider("Number of Keyframes", 5, 30, 12)
-    min_gap_sec = st.slider("Minimum Difference Gap (seconds)", 0.0, 5.0, 0.5)
+    min_gap_sec = st.slider("Minimum Separation Between Keyframes (seconds)", 0.0, 5.0, 0.5)
     st.markdown("---")
-    st.caption("SSIM = structural similarity. Lower similarity = more meaningful change.")
+    st.caption("Lower SSIM = more structural change. Large change → likely scene cut.")
 
 if not uploaded:
     st.stop()
@@ -134,14 +143,14 @@ cols = st.columns(min(len(keyframes), 6))
 for i, fr in enumerate(keyframes):
     cols[i % len(cols)].image(fr.rgb, caption=f"t={fr.time_s:.2f}s (#{fr.index})", use_column_width=True)
 
+
 # -----------------------------
-# Frame Comparison + Narrative Heatmap
+# Interactive Comparison + Narrative Interpretation
 # -----------------------------
 st.markdown("---")
 st.subheader("🔍 Compare Frames")
 
 labels = [f"t={fr.time_s:.2f}s (#{fr.index})" for fr in keyframes]
-
 iA = st.selectbox("Frame A", range(len(keyframes)), format_func=lambda i: labels[i])
 iB = st.selectbox("Frame B", range(len(keyframes)), format_func=lambda i: labels[i])
 
@@ -162,13 +171,14 @@ st.image(blend(A,B,alpha), caption=f"Blend α={alpha:.2f}", use_column_width=Tru
 heat, ssim_score = ssim_diff_map(A, B)
 st.image(heat, caption=f"SSIM Score = {ssim_score:.4f} (higher = more similar)")
 
+# Narrative explanation:
 if ssim_score > 0.85:
-    msg = "These frames are nearly identical — minimal visual change."
-elif ssim_score > 0.6:
-    msg = "Moderate change — likely movement or minor camera shift."
+    msg = "These frames are nearly identical — minimal structural change."
+elif ssim_score > 0.60:
+    msg = "Moderate change — likely object or camera motion."
 elif ssim_score > 0.35:
-    msg = "Meaningful change — new composition, object, or visual focus."
+    msg = "Meaningful visual change — composition/scene emphasis is shifting."
 else:
-    msg = "**Major change** — likely a scene / shot transition."
+    msg = "**Major visual transition** — this is likely a **scene or shot boundary**."
 
 st.markdown(f"**Interpretation:** {msg}")
