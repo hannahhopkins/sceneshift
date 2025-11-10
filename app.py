@@ -39,16 +39,32 @@ def blend(a, b, alpha):
 
 
 # ------------------------------------------------------------
-# Cached video downloader (URL → bytes)
+# Helper: test decode success (detect AV1 decoding failure)
+# ------------------------------------------------------------
+def can_decode_video(file_bytes):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp.write(file_bytes)
+    tmp.flush()
+    cap = cv2.VideoCapture(tmp.name)
+    ret, _ = cap.read()
+    cap.release()
+    return ret  # True if at least 1 frame decodes properly
+
+
+# ------------------------------------------------------------
+# Cached downloader (URL → bytes) with fallback
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def download_video_cached(url, quality_format, no_audio):
-    # Try direct .mp4/.mov/etc download first
+    # Try direct .mp4/.mov/etc download first — this is fastest path
     try:
         response = requests.get(url, timeout=8, stream=True)
-        content_type = response.headers.get("Content-Type", "").lower()
-        if "video" in content_type or url.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")):
-            return response.content
+        ctype = response.headers.get("Content-Type", "").lower()
+        if "video" in ctype or url.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")):
+            file_bytes = response.content
+            if can_decode_video(file_bytes):
+                return file_bytes
+            # If decode fails, continue to yt-dlp fallback
     except:
         pass
 
@@ -59,36 +75,55 @@ def download_video_cached(url, quality_format, no_audio):
             downloaded = d.get("downloaded_bytes", 0)
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             if total:
-                frac = min(downloaded / total, 1.0)
+                frac = downloaded / total
                 percent = int(frac * 100)
                 progress_bar.progress(frac, text=f"Downloading: {percent}%")
         elif d.get("status") == "finished":
-            progress_bar.progress(1.0, text="Download complete. Processing video…")
+            progress_bar.progress(1.0, text="Download complete. Processing…")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-        out_path = tmp.name
-
-    # Force MP4 container for OpenCV compatibility
-    if no_audio:
-        format_string = f"{quality_format}[ext=mp4]"
-    else:
-        format_string = f"{quality_format}+bestaudio[ext=mp4]/best[ext=mp4]"
-
-    ydl_opts = {
-        "format": format_string,
-        "outtmpl": out_path,
-        "quiet": True,
-        "progress_hooks": [hook],
-        "nocheckcertificate": True,
-    }
-
-    try:
+    # Function to perform download
+    def yt_download(fmt):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            out_path = tmp.name
+        ydl_opts = {
+            "format": fmt,
+            "outtmpl": out_path,
+            "quiet": True,
+            "progress_hooks": [hook],
+            "nocheckcertificate": True,
+        }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-
         with open(out_path, "rb") as f:
             return f.read()
 
+    # Primary attempt (user-selected quality)
+    if no_audio:
+        fmt = f"{quality_format}[ext=mp4]"
+    else:
+        fmt = f"{quality_format}+bestaudio[ext=mp4]/best[ext=mp4]"
+
+    try:
+        file_bytes = yt_download(fmt)
+        if can_decode_video(file_bytes):
+            return file_bytes
+    except:
+        pass
+
+    # --------------------------------------------------------
+    # Fallback attempt: force OpenCV-safe AVC1 (H.264) + MP4
+    # --------------------------------------------------------
+    fallback = "bv*[vcodec~='avc1']"
+    if no_audio:
+        fallback_fmt = f"{fallback}[ext=mp4]"
+    else:
+        fallback_fmt = f"{fallback}+bestaudio[ext=mp4]/best[ext=mp4]"
+
+    st.write("Re-downloading using H.264 fallback…")
+
+    try:
+        file_bytes = yt_download(fallback_fmt)
+        return file_bytes
     except Exception as e:
         st.error(f"Download failed: {e}")
         return None
@@ -103,7 +138,7 @@ def load_video_bytes(uploaded_file, url, quality_format, no_audio):
 
 
 # ------------------------------------------------------------
-# Decode + frame sampling
+# Decode video + sample frames
 # ------------------------------------------------------------
 def decode_video(file_bytes, sample_fps):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -113,13 +148,12 @@ def decode_video(file_bytes, sample_fps):
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
-        st.error("Could not decode video.")
         return [], 0, 0
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     duration = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1) / fps
 
-    # Adaptive sampling
+    # Adaptive sampling for performance
     if duration > 120:
         sample_fps *= 0.25
     elif duration > 40:
@@ -174,19 +208,17 @@ def pick_keyframes(frames, scores, k, min_gap_sec, sample_fps):
     gap = max(int(min_gap_sec * sample_fps), 1)
     order = list(np.argsort(scores)[::-1])
     picks = []
-
     for i in order:
         if len(picks) >= k:
             break
         if all(abs(i - p) >= gap for p in picks):
             picks.append(i)
-
     picks.sort()
     return [frames[i] for i in picks]
 
 
 # ------------------------------------------------------------
-# Sidebar
+# Sidebar UI
 # ------------------------------------------------------------
 with st.sidebar:
     st.header("Video Input")
@@ -212,13 +244,12 @@ with st.sidebar:
 
 
 # ------------------------------------------------------------
-# Load / decode
+# Run pipeline
 # ------------------------------------------------------------
 st.title("Keyframe Extractor & Visual Change Explorer")
-file_bytes = load_video_bytes(uploaded, url, quality_format, no_audio)
 
+file_bytes = load_video_bytes(uploaded, url, quality_format, no_audio)
 if file_bytes is None:
-    st.info("Upload a file or enter a valid video link to begin.")
     st.stop()
 
 with st.expander("Preview Video"):
@@ -226,7 +257,7 @@ with st.expander("Preview Video"):
 
 frames, fps, duration = decode_video(file_bytes, sample_fps)
 if len(frames) < 2:
-    st.error("Not enough frames could be decoded. Try another quality setting: Low or Medium usually works best.")
+    st.error("Video was downloaded, but could not be decoded. Try selecting Low or Medium quality.")
     st.stop()
 
 scores = compute_scores(frames, metric)
@@ -234,14 +265,13 @@ keyframes = pick_keyframes(frames, scores, k, min_gap_sec, sample_fps)
 
 
 # ------------------------------------------------------------
-# Timeline
+# Interactive timeline
 # ------------------------------------------------------------
 st.subheader("Change Score Timeline (Interactive)")
 if len(scores) > 0:
     times = [frames[i].time_s for i in range(1, len(frames))]
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=times, y=scores, mode="lines", name="Change Score"))
-
     k_times = [fr.time_s for fr in keyframes]
     fig.add_trace(go.Scatter(
         x=k_times,
@@ -250,7 +280,6 @@ if len(scores) > 0:
         marker=dict(size=8),
         name="Keyframes"
     ))
-
     fig.update_layout(xaxis_title="Time (seconds)", yaxis_title="Change Score")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -265,7 +294,7 @@ for i, fr in enumerate(keyframes):
 
 
 # ------------------------------------------------------------
-# Frame comparison
+# Compare frames
 # ------------------------------------------------------------
 st.markdown("---")
 st.subheader("Compare Frames")
@@ -295,7 +324,7 @@ if score > 0.85:
 elif score > 0.60:
     text = "Moderate visual change"
 elif score > 0.35:
-    text = "Meaningful change in visual content"
+    text = "Meaningful visual difference"
 else:
     text = "Major scene or shot transition"
 
