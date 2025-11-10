@@ -47,7 +47,8 @@ def download_video_cached(url, quality_format, no_audio):
     Downloads video once and returns raw bytes.
     Cached by (url, quality_format, no_audio).
     """
-    # Try direct download first
+
+    # Try direct link first
     try:
         response = requests.get(url, timeout=8, stream=True)
         content_type = response.headers.get("Content-Type", "").lower()
@@ -56,8 +57,48 @@ def download_video_cached(url, quality_format, no_audio):
     except:
         pass
 
-    progress = st.progress(0)
-    progress_label = st.empty()
+    progress_bar = st.progress(0, text="Preparing download…")
+
+    def hook(d):
+        if d.get("status") == "downloading":
+            downloaded = d.get("downloaded_bytes", 0)
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+
+            if total:
+                frac = min(downloaded / total, 1.0)
+                percent = int(frac * 100)
+                progress_bar.progress(frac, text=f"Downloading: {percent}%")
+
+        elif d.get("status") == "finished":
+            progress_bar.progress(1.0, text="Download complete. Processing video…")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        out_path = tmp.name
+
+    # Quality + Speed rules
+    if no_audio:
+        format_string = quality_format   # avoids merging entirely
+    else:
+        format_string = f"{quality_format}+bestaudio/best"
+
+    ydl_opts = {
+        "format": format_string,
+        "outtmpl": out_path,
+        "quiet": True,
+        "progress_hooks": [hook],
+        "nocheckcertificate": True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        with open(out_path, "rb") as f:
+            return f.read()
+
+    except Exception as e:
+        st.error(f"Download failed: {e}")
+        return None
 
     def hook(d):
         if d.get("status") == "downloading":
