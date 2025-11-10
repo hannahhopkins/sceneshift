@@ -55,18 +55,76 @@ def can_decode_video(file_bytes):
 # Cached downloader (URL → bytes) with fallback
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def download_video_cached(url, quality_format, no_audio):
-    # Try direct .mp4/.mov/etc download first — this is fastest path
+    import subprocess
+
+    def try_decode(bytes_data):
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        tmp.write(bytes_data)
+        tmp.flush()
+        cap = cv2.VideoCapture(tmp.name)
+        ok, _ = cap.read()
+        cap.release()
+        return ok
+
+    # Try direct download
     try:
-        response = requests.get(url, timeout=8, stream=True)
-        ctype = response.headers.get("Content-Type", "").lower()
-        if "video" in ctype or url.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")):
-            file_bytes = response.content
-            if can_decode_video(file_bytes):
-                return file_bytes
-            # If decode fails, continue to yt-dlp fallback
+        r = requests.get(url, timeout=8, stream=True)
+        ct = r.headers.get("Content-Type", "").lower()
+        if "video" in ct or url.lower().endswith((".mp4",".mov",".avi",".mkv",".webm")):
+            data = r.content
+            if try_decode(data):
+                return data
     except:
         pass
+
+    progress_bar = st.progress(0, text="Preparing download…")
+
+    def hook(d):
+        if d.get("status") == "downloading":
+            t = d.get("total_bytes") or d.get("total_bytes_estimate")
+            if t:
+                frac = d.get("downloaded_bytes", 0) / t
+                progress_bar.progress(frac, text=f"Downloading: {int(frac*100)}%")
+        elif d.get("status") == "finished":
+            progress_bar.progress(1.0, text="Download complete. Checking playback…")
+
+    # Attempt primary download
+    if no_audio:
+        fmt = f"{quality_format}[ext=mp4]"
+    else:
+        fmt = f"{quality_format}+bestaudio[ext=mp4]/best[ext=mp4]"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        out_path = tmp.name
+
+    try:
+        with yt_dlp.YoutubeDL({"format": fmt, "outtmpl": out_path, "quiet": True, "progress_hooks": [hook], "nocheckcertificate": True}) as ydl:
+            ydl.download([url])
+        with open(out_path, "rb") as f:
+            data = f.read()
+        if try_decode(data):
+            return data
+    except:
+        pass
+
+    # Fallback: force re-encode → guaranteed OpenCV compatibility
+    progress_bar.progress(0, text="Re-encoding video to H.264 for compatibility…")
+
+    h264_path = out_path + "_h264.mp4"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", out_path, "-c:v", "libx264", "-c:a", "aac", h264_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        with open(h264_path, "rb") as f:
+            data = f.read()
+        return data
+    except Exception as e:
+        st.error(f"Re-encoding failed: {e}")
+        return None
+
 
     progress_bar = st.progress(0, text="Preparing download…")
 
