@@ -2,6 +2,7 @@ import streamlit as st
 import cv2
 import numpy as np
 import tempfile
+import requests
 from skimage.metrics import structural_similarity as ssim
 
 st.set_page_config(page_title="Keyframe Extractor & Visual Change Explorer", layout="wide")
@@ -27,6 +28,22 @@ def rgb2gray(x):
 
 def blend(a, b, alpha):
     return np.clip(a * alpha + b * (1 - alpha), 0, 255).astype(np.uint8)
+
+
+def load_video_bytes(uploaded_file, url):
+    if uploaded_file:
+        return uploaded_file.getvalue()
+
+    if url:
+        try:
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            st.error(f"Could not download video from URL: {e}")
+            return None
+
+    return None
 
 
 def decode_video(file_bytes, sample_fps):
@@ -79,7 +96,7 @@ def compute_scores(frames, metric):
             cv2.normalize(Ah, Ah); cv2.normalize(Bh, Bh)
             val = cv2.compareHist(Ah, Bh, cv2.HISTCMP_BHATTACHARYYA)
 
-        else:  # MSE
+        else:
             diff = (A.astype(float) - B.astype(float))
             val = np.mean(diff * diff) / (255 * 255)
 
@@ -104,30 +121,24 @@ def pick_keyframes(frames, scores, k, min_gap_sec, sample_fps):
 
 
 with st.sidebar:
-    st.header("Controls")
-    uploaded = st.file_uploader("Upload Video", type=["mp4","mov","avi","mkv"], key="video_upload")
+    st.header("Video Input")
+    uploaded = st.file_uploader("Upload Video File", type=["mp4","mov","avi","mkv"], key="video_upload")
+    url = st.text_input("Or enter direct video URL (mp4/mov/avi/etc.)")
+
+    st.header("Keyframe Settings")
     sample_fps = st.slider("Sampling FPS", 1.0, 8.0, 2.0)
-
     metric = st.radio("Change Metric", ["SSIM (1-SSIM)", "Color Histogram (Bhattacharyya)", "MSE"])
-
-    # NEW — descriptive guidance directly under selector
-    if metric == "SSIM (1-SSIM)":
-        st.caption("Measures structural layout differences. Best for detecting shot changes or composition shifts.")
-    elif metric == "Color Histogram (Bhattacharyya)":
-        st.caption("Compares overall color distribution. Useful when overall tone or lighting changes significantly.")
-    else:
-        st.caption("Pixel-wise difference. Sensitive to camera shake and noise; use when fine detail differences matter.")
-
     k = st.slider("Number of Keyframes", 5, 30, 12)
     min_gap_sec = st.slider("Minimum Time Between Keyframes (sec)", 0.0, 5.0, 0.5)
 
 st.title("Keyframe Extractor & Visual Change Explorer")
 
-if not uploaded:
+file_bytes = load_video_bytes(uploaded, url)
+if not file_bytes:
+    st.info("Upload a video or enter a direct link to begin.")
     st.stop()
 
-
-frames, orig_fps, duration = decode_video(uploaded.getvalue(), sample_fps)
+frames, orig_fps, duration = decode_video(file_bytes, sample_fps)
 if len(frames) < 2:
     st.error("Not enough frames extracted.")
     st.stop()
@@ -135,12 +146,10 @@ if len(frames) < 2:
 scores = compute_scores(frames, metric)
 keyframes = pick_keyframes(frames, scores, k, min_gap_sec, sample_fps)
 
-
 st.subheader(f"Selected Keyframes ({len(keyframes)})")
 cols = st.columns(min(len(keyframes), 6))
 for i, fr in enumerate(keyframes):
     cols[i % len(cols)].image(fr.rgb, caption=f"Time: {fr.time_s:.2f}s | Frame {fr.index}", use_column_width=True)
-
 
 st.markdown("---")
 st.subheader("Compare Frames")
@@ -163,7 +172,6 @@ col2.image(B, caption="Frame B", use_column_width=True)
 alpha = st.slider("Crossfade Blend Amount", 0.0, 1.0, 0.5)
 st.image(blend(A,B,alpha), caption=f"Blend: {alpha:.2f}", use_column_width=True)
 
-
 ssim_score = ssim(rgb2gray(A), rgb2gray(B), data_range=255)
 
 if ssim_score > 0.85:
@@ -177,20 +185,3 @@ else:
 
 st.markdown(f"SSIM Score = {ssim_score:.4f}")
 st.markdown(f"Interpretation: {interpretation}")
-
-
-# NEW — reference guide
-with st.expander("How to choose the right metric"):
-    st.markdown("""
-**SSIM (1-SSIM)**  
-Focuses on structural similarity — it reacts to composition, object arrangement, and scene layout.  
-Use when you want to detect shot boundaries, reframing, subject repositioning, or meaningful context changes.
-
-**Color Histogram (Bhattacharyya)**  
-Ignores structure, focuses on color palette.  
-Use when the video shifts from indoors to outdoors, day to night, warm to cool lighting, etc.
-
-**MSE (Mean Squared Error)**  
-Measures raw pixel difference.  
-Use only when very fine visual detail differences matter. It is sensitive to noise and camera motion.
-""" )
