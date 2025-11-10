@@ -4,3 +4,4 @@ numpy
 Pillow
 ffmpeg-python
 scikit-image
+reportlab
