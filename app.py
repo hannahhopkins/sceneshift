@@ -1,4 +1,3 @@
-import tempfile
 import io
 import os
 import math
@@ -45,40 +44,43 @@ def resize_max(img: np.ndarray, max_w: int = 960, max_h: int = 540) -> np.ndarra
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def decode_video(file_bytes: bytes, sample_fps: float = 2.0, max_dim: Tuple[int, int] = (960, 540)) -> Tuple[List[FrameRecord], float]:
-    """Decode the uploaded video using OpenCV and sample frames at ~sample_fps."""
-    
-    # Write bytes to a temporary file for cv2.VideoCapture
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tmp.write(file_bytes)
-    tmp.flush()
-    tmp_path = tmp.name
-    tmp.close()
+    """Decode the uploaded video using OpenCV (which typically uses FFmpeg under the hood)
+    and sample frames at approximately `sample_fps`. Returns a list of FrameRecord and the
+    original video FPS.
+    """
+    # Write to a temp file for cv2.VideoCapture
+    tmp_path = os.path.join(st.cache_data.get_cache_path(), "_uploaded_video.mp4")
+    with open(tmp_path, "wb") as f:
+        f.write(file_bytes)
 
     cap = cv2.VideoCapture(tmp_path)
     if not cap.isOpened():
-        raise RuntimeError("Could not open video. Ensure FFmpeg/codec support is available.")
+        raise RuntimeError("Could not open video. If this persists, ensure FFmpeg codecs are available.")
 
     orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+    # Compute sampling stride in frames
     stride = max(int(round(orig_fps / max(sample_fps, 0.1))), 1)
 
     frames: List[FrameRecord] = []
     idx = 0
+    out_idx = 0
     while True:
         ret, frame_bgr = cap.read()
         if not ret:
             break
-
         if idx % stride == 0:
+            # Downscale for speed
             frame_bgr_small = resize_max(frame_bgr, max_w=max_dim[0], max_h=max_dim[1])
             frame_rgb_small = bgr2rgb(frame_bgr_small)
             t = idx / max(orig_fps, 1e-6)
             frames.append(FrameRecord(index=idx, time_s=t, image_bgr=frame_bgr_small, image_rgb=frame_rgb_small))
-
+            out_idx += 1
         idx += 1
 
     cap.release()
     return frames, float(orig_fps)
-
 
 
 # -----------------------------
@@ -332,6 +334,18 @@ else:
         st.markdown("**SSIM Difference Heatmap** (warm colors = larger change)")
         heat, ssim_score = ssim_diff_map(A_res, B_res)
         st.image(heat, use_column_width=True, caption=f"SSIM score = {ssim_score:.4f} (higher = more similar)")
+
+        # Narrative explanation based on SSIM score
+        if ssim_score > 0.85:
+            narrative = "These frames are highly similar. There is little structural or scene-level change."
+        elif ssim_score > 0.6:
+            narrative = "There is moderate change, likely corresponding to movement or subtle composition shifts."
+        elif ssim_score > 0.35:
+            narrative = "There is a noticeable change in the scene, composition, or objects, indicating a meaningful transition."
+        else:
+            narrative = "This appears to be a major scene change or shot boundary, with strong structural difference across the image."
+
+        st.markdown(f"**Interpretation:** {narrative}")
 
 # -----------------------------
 # Explanations (short, per-toggle)
