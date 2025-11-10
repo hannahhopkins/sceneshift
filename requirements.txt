@@ -1,7 +1,5 @@
-streamlit==1.40.0
-opencv-python-headless
-numpy
-Pillow
-ffmpeg-python
-scikit-image
-reportlab
+streamlit>=1.37
+opencv-python-headless>=4.9.0.80
+scikit-image>=0.22
+numpy>=1.26
+Pillow>=10.0
