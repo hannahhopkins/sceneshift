@@ -207,9 +207,69 @@ with st.sidebar:
 st.title("Keyframe Extractor & Visual Change Explorer")
 
 file_bytes = load_video_bytes(uploaded, url)
-if not file_bytes:
-    st.info("Upload a video or enter a link to begin.")
-    st.stop()
+import yt_dlp
+import requests
+import tempfile
+
+def load_video_bytes(uploaded_file, url):
+    if uploaded_file:
+        return uploaded_file.getvalue()
+
+    if not url:
+        return None
+
+    # Try direct download first
+    try:
+        response = requests.get(url, timeout=8, stream=True)
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "video" in content_type or url.lower().endswith((".mp4",".mov",".avi",".mkv",".webm")):
+            return response.content
+    except:
+        pass
+
+    # yt-dlp download with clearer UI
+    st.write("Preparing to download video…")
+
+    progress_bar = st.progress(0)
+    progress_label = st.empty()
+
+    def progress_hook(d):
+        if d.get("status") == "downloading":
+            downloaded = d.get("downloaded_bytes", 0)
+            total = d.get("total_bytes", None) or d.get("total_bytes_estimate", None)
+
+            if total:
+                frac = downloaded / total
+                percent = int(frac * 100)
+                progress_bar.progress(frac)
+                progress_label.text(f"Downloading: {percent}%")
+
+        elif d.get("status") == "finished":
+            progress_bar.progress(1.0)
+            progress_label.text("Download complete. Processing video…")
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            out_path = tmp.name
+
+        # Faster: avoid merging high-quality audio+video
+        ydl_opts = {
+            "format": "mp4/best",  # simpler & faster than bestvideo+bestaudio
+            "outtmpl": out_path,
+            "quiet": True,
+            "progress_hooks": [progress_hook],
+            "nocheckcertificate": True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        with open(out_path, "rb") as f:
+            return f.read()
+
+    except Exception as e:
+        st.error(f"Video download failed: {e}")
+        return None
 
 
 # Video Preview
