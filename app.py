@@ -3,6 +3,7 @@ import io
 import math
 import tempfile
 import subprocess
+import zipfile
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
@@ -306,11 +307,60 @@ with st.spinner("Scoring changes and selecting keyframes…"):
 # Timeline / preview
 # =============================
 st.subheader("Selected Keyframes")
+
+# Gallery with selectable checkboxes
 thumb_cols = st.columns(min(6, max(2, len(keyframes))))
 for i, fr in enumerate(keyframes):
     with thumb_cols[i % len(thumb_cols)]:
         stamped = overlay_timestamp(fr.image_rgb, fr.time_s)
         st.image(stamped, caption=f"t={fr.time_s:.2f}s (#{fr.index})", use_column_width=True)
+        st.checkbox("Select", key=f"sel_{i}")
+
+# Selection controls
+sel_indices = [i for i in range(len(keyframes)) if st.session_state.get(f"sel_{i}", False)]
+col_a, col_b, col_c = st.columns([1,1,2])
+with col_a:
+    if st.button("Select all"):
+        for i in range(len(keyframes)):
+            st.session_state[f"sel_{i}"] = True
+        sel_indices = list(range(len(keyframes)))
+with col_b:
+    if st.button("Clear all"):
+        for i in range(len(keyframes)):
+            st.session_state[f"sel_{i}"] = False
+        sel_indices = []
+with col_c:
+    st.caption(f"Selected: {len(sel_indices)} of {len(keyframes)}")
+
+# Create ZIP for download
+if 'zip_bytes' not in st.session_state:
+    st.session_state.zip_bytes = None
+
+if st.button("Create ZIP of selected frames"):
+    if not sel_indices:
+        st.warning("No frames selected.")
+    else:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+            for i in sel_indices:
+                fr = keyframes[i]
+                img = Image.fromarray(fr.image_rgb)
+                # filename with frame index and seconds (safe formatting)
+                t_str = f"{fr.time_s:.2f}".replace('.', '_')
+                name = f"frame_{fr.index:06d}_t{t_str}s.png"
+                sub = io.BytesIO()
+                img.save(sub, format='PNG')
+                zf.writestr(name, sub.getvalue())
+        st.session_state.zip_bytes = buf.getvalue()
+        st.success("ZIP prepared. Use the button below to download.")
+
+if st.session_state.get('zip_bytes'):
+    st.download_button(
+        label="Download selected frames (.zip)",
+        data=st.session_state['zip_bytes'],
+        file_name="selected_keyframes.zip",
+        mime="application/zip",
+    )
 
 st.markdown("---")
 
